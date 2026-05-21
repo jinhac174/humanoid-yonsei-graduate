@@ -55,15 +55,42 @@ def _get_yaw(env: "BoxTransportEnv", env_ids: torch.Tensor) -> torch.Tensor:
 # Resets
 # -----------------------------------------------------------------------------
 def reset_robot(env: "BoxTransportEnv", env_ids: torch.Tensor) -> None:
-    """Reset root pose + joint state with small uniform noise."""
+    """Reset root pose + joint state.
+
+    Curriculum-aware (only when ``cfg.curriculum_enabled``):
+
+      * stage 0 / 1 — spawn the robot standing AT the start table (the spot
+        the autocmd would stop it at), facing +x toward the box, with only
+        tiny pose noise. The walk-in is skipped.
+      * stage 0 also overrides the arm+hand joints with a grasp-ready pose
+        so the policy starts with its arms already around the box and only
+        has to learn squeeze → lift → carry → place.
+      * stage 2 — identical to the non-curriculum spawn (world origin).
+
+    When ``curriculum_enabled`` is False this is the plain world-origin
+    spawn — byte-identical to the standard box_transport task.
+    """
     cfg = env.cfg
     n = env_ids.numel()
     device = env.device
 
+    curriculum = bool(cfg.curriculum_enabled)
+    stage = env._curriculum_stage if curriculum else 2
+    at_table = curriculum and stage <= 1
+
     default_root_state = env.robot.data.default_root_state[env_ids].clone()
-    dx = _uniform(n, *cfg.reset_pose_x_range, device=device)
-    dy = _uniform(n, *cfg.reset_pose_y_range, device=device)
-    yaw = _uniform(n, *cfg.reset_pose_yaw_range, device=device)
+    if at_table:
+        # Spawn standing at the start table (env-local), facing +x.
+        default_root_state[:, 0] = env._curriculum_at_table_pos[0]
+        default_root_state[:, 1] = env._curriculum_at_table_pos[1]
+        default_root_state[:, 2] = env._curriculum_at_table_pos[2]
+        dx  = _uniform(n, -0.05, 0.05, device=device)
+        dy  = _uniform(n, -0.05, 0.05, device=device)
+        yaw = _uniform(n, -0.15, 0.15, device=device)
+    else:
+        dx  = _uniform(n, *cfg.reset_pose_x_range, device=device)
+        dy  = _uniform(n, *cfg.reset_pose_y_range, device=device)
+        yaw = _uniform(n, *cfg.reset_pose_yaw_range, device=device)
 
     default_root_state[:, 0] += dx
     default_root_state[:, 1] += dy
@@ -90,10 +117,14 @@ def reset_robot(env: "BoxTransportEnv", env_ids: torch.Tensor) -> None:
     env.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids=env_ids)
     env.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids=env_ids)
 
-    # Joint state at default (no scaling/noise for now — keep the warm-started
-    # policy's expected initial state).
+    # Joint state — default pose, except curriculum stage 0 overrides the
+    # 28 arm+hand joints with the grasp-ready pose so the policy starts
+    # with its arms already wrapped around the box.
     default_jpos = env.robot.data.default_joint_pos[env_ids].clone()
     default_jvel = env.robot.data.default_joint_vel[env_ids].clone()
+    if curriculum and stage == 0:
+        arm_hand_ids = env._actuated_joint_ids[15:43]      # arms[15:29]|hands[29:43]
+        default_jpos[:, arm_hand_ids] = env._curriculum_grasp_pose
     env.robot.write_joint_state_to_sim(default_jpos, default_jvel, env_ids=env_ids)
 
 

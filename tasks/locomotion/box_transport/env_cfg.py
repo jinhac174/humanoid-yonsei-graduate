@@ -88,6 +88,26 @@ BOX_LIFT_Z = BOX_REST_Z + 0.10                      # = 0.77 m
 BOX_HALF_EXTENT = BOX_SIZE[1] / 2        # 0.12 m
 
 
+# --- Curriculum constants (opt-in reverse curriculum) --------------------
+# Robot standing pose for curriculum stages 0-1 — at the start table, the
+# spot the autocmd would naturally stop it at to grab the box. env-local
+# (the per-env origin is added at reset). Faces +x toward the box.
+CURRICULUM_ROBOT_AT_TABLE = (1.80, 0.0, 0.74)
+
+# Grasp-ready arm+hand pose (radians) for curriculum stage 0 — both arms
+# reaching forward toward the box so the policy starts with its arms
+# already around it. 28 values in the actuated-joint order: left arm (7),
+# right arm (7), left hand (7), right hand (7). Per arm the 7 joints are
+# shoulder_pitch, shoulder_roll, shoulder_yaw, elbow, wrist_roll,
+# wrist_pitch, wrist_yaw. Hands stay open (0).
+CURRICULUM_GRASP_ARM_POSE = (
+    1.0, 0.0, 0.0, 0.6, 0.0, 0.0, 0.0,        # left arm  — reach forward
+    1.0, 0.0, 0.0, 0.6, 0.0, 0.0, 0.0,        # right arm — reach forward
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,        # left hand — open
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,        # right hand — open
+)
+
+
 # --- Scene --------------------------------------------------------------
 @configclass
 class BoxTransportSceneCfg(InteractiveSceneCfg):
@@ -330,6 +350,21 @@ class BoxTransportEnvCfg(DirectRLEnvCfg):
     # which catches a torso lean even when the pelvis itself is level.
     pen_joint_dev_waist:    float = 0.6
     pen_torso_upright:      float = 1.0
+
+    # ── Curriculum (opt-in reverse curriculum) ──────────────────────────
+    # When False (default) the task is the standard single-shot
+    # box_transport — byte-identical behaviour. When True, training resets
+    # follow a 3-stage reverse curriculum (see env.py / events.py):
+    #   stage 0  robot at the table, arms pre-posed around the box
+    #   stage 1  robot at the table, arms in the default pose
+    #   stage 2  robot at the world origin — the full task
+    # A stage advances once the rolling episode-success EMA clears
+    # ``curriculum_advance_threshold`` (or after the force-advance cap, so
+    # a stuck stage can't deadlock the run). Eval always runs the full
+    # task — the curriculum only changes training resets.
+    curriculum_enabled:             bool  = False
+    curriculum_advance_threshold:   float = 0.5
+    curriculum_max_steps_per_stage: int   = 60000   # force-advance cap (control steps)
 
     # ── Termination ──────────────────────────────────────────────────────
     # Robot fell (same 3-signal check as locomotion).

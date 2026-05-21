@@ -4,18 +4,19 @@
 #
 # Required env vars:
 #   ALGO  ∈ {ppo, sapg, epo}
-#   MODE  ∈ {scratch, warmstart}
+#   MODE  ∈ {scratch, warmstart, curriculum}
 #
-# MODE drives the only difference between the two run families:
-#   scratch    — random init, no checkpoint.        run dir: <algo>_NN_scratch
-#   warmstart  — load velocity_tracking model_1500.  run dir: <algo>_NN_warmstart
-# ``+run_tag=$MODE`` is appended either way so the run dir / wandb name
-# carry the family in their name.
+# MODE drives the difference between the run families:
+#   scratch     — random init, no checkpoint.        <algo>_NN_scratch
+#   warmstart   — load velocity_tracking model_1500.  <algo>_NN_warmstart
+#   curriculum  — warmstart + the 3-stage reverse curriculum enabled,
+#                 longer budget (8000 iters).         <algo>_NN_curriculum
+# ``+run_tag=$MODE`` is appended so the run dir / wandb name carry it.
 
 set -euo pipefail
 
 : "${ALGO:?must be set: ppo|sapg|epo}"
-: "${MODE:?must be set: scratch|warmstart}"
+: "${MODE:?must be set: scratch|warmstart|curriculum}"
 
 IMAGE=/home/danielc174/IsaacSim/isaacsim.sif
 ISAACLAB=/home/danielc174/IsaacLab
@@ -27,11 +28,18 @@ mkdir -p "$CACHE"/{kit,ov,pip,glcache,computecache,logs,data,documents}
 
 # Mode-specific Hydra args.
 EXTRA_ARGS=( "+run_tag=$MODE" )
-if [ "$MODE" = "warmstart" ]; then
+if [ "$MODE" = "warmstart" ] || [ "$MODE" = "curriculum" ]; then
     CKPT="/scratch2/danielc174/humanoid-rl/outputs/velocity_tracking/${ALGO}/${ALGO}_00/checkpoints/model_1500.pt"
     [ -f "$CKPT" ] || { echo "[sbatch] CKPT NOT FOUND: $CKPT"; exit 1; }
     EXTRA_ARGS+=( "checkpoint=$CKPT" )
     echo "[sbatch] warm-start ckpt: $CKPT"
+fi
+if [ "$MODE" = "curriculum" ]; then
+    # Enable the 3-stage reverse curriculum and give it a longer budget so
+    # there is room to progress through all stages and still train on the
+    # full task.
+    EXTRA_ARGS+=( "++task.curriculum_enabled=true" "++task.max_iterations=8000" )
+    echo "[sbatch] curriculum enabled, max_iterations=8000"
 fi
 
 echo "[sbatch] node=${SLURMD_NODENAME:-?} job=${SLURM_JOB_ID:-?} algo=$ALGO mode=$MODE"

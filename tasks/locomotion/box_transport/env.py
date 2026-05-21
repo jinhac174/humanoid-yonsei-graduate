@@ -50,6 +50,8 @@ from .env_cfg import (
     BOX_LIFT_Z,
     BOX_REST_Z,
     BOX_SPAWN_POS,
+    CURRICULUM_GRASP_ARM_POSE,
+    CURRICULUM_ROBOT_AT_TABLE,
     LEFT_FOOT_BODY,
     LEFT_PALM_BODY,
     RIGHT_FOOT_BODY,
@@ -167,6 +169,19 @@ class BoxTransportEnv(DirectRLEnv):
         self._lift_achieved = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device,
         )
+
+        # -- Curriculum state (only used when cfg.curriculum_enabled) --
+        #    stage 0 assisted-grasp → 1 free-grasp → 2 full task. Advances
+        #    on the rolling episode-success EMA. See _curriculum_update.
+        self._curriculum_stage = 0
+        self._curriculum_success_ema = 0.0
+        self._curriculum_steps_in_stage = 0
+        self._curriculum_grasp_pose = torch.tensor(
+            CURRICULUM_GRASP_ARM_POSE, dtype=torch.float32, device=self.device,
+        )
+        self._curriculum_at_table_pos = torch.tensor(
+            CURRICULUM_ROBOT_AT_TABLE, dtype=torch.float32, device=self.device,
+        )
         # -- Success counter — consecutive frames the box is on target --
         self._success_step_count = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device,
@@ -236,6 +251,11 @@ class BoxTransportEnv(DirectRLEnv):
     # Step pipeline
     # ------------------------------------------------------------------
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        # Curriculum: count control steps in the current stage (drives the
+        # force-advance cap so a stuck stage cannot deadlock the run).
+        if self.cfg.curriculum_enabled:
+            self._curriculum_steps_in_stage += 1
+
         # Auto-derive the velocity command from the task phase BEFORE the obs
         # / reward step reads it.
         event_fn.update_autocmd(self)
@@ -264,8 +284,41 @@ class BoxTransportEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         return term_fn.compute_dones(self)
 
+    def _curriculum_update(self, env_ids: torch.Tensor) -> None:
+        """Advance the curriculum stage based on rolling episode success.
+
+        Called at the START of ``_reset_idx`` (before ``reset_robot``) so the
+        envs being reset spawn into the up-to-date stage. The success EMA is
+        updated from ``_success_buf`` (which ``terminations.compute_dones``
+        set this step) for the resetting envs. A stage advances when the EMA
+        clears ``curriculum_advance_threshold``, OR after
+        ``curriculum_max_steps_per_stage`` control steps — the cap stops a
+        stage the policy cannot solve from deadlocking the whole run.
+        """
+        if not self.cfg.curriculum_enabled or self._curriculum_stage >= 2:
+            return
+        if env_ids.numel() > 0:
+            succ = self._success_buf[env_ids].float().mean().item()
+            self._curriculum_success_ema = (
+                0.95 * self._curriculum_success_ema + 0.05 * succ
+            )
+        advance = (
+            self._curriculum_success_ema >= self.cfg.curriculum_advance_threshold
+            or self._curriculum_steps_in_stage >= self.cfg.curriculum_max_steps_per_stage
+        )
+        if advance:
+            self._curriculum_stage += 1
+            why = ("success" if self._curriculum_success_ema
+                   >= self.cfg.curriculum_advance_threshold else "step-cap")
+            print(f"[curriculum] → stage {self._curriculum_stage}  ({why}, "
+                  f"ema={self._curriculum_success_ema:.2f})")
+            self._curriculum_success_ema = 0.0
+            self._curriculum_steps_in_stage = 0
+
     def _reset_idx(self, env_ids: torch.Tensor) -> None:
         super()._reset_idx(env_ids)
+        # Curriculum advance check first — reset_robot reads the stage.
+        self._curriculum_update(env_ids)
         event_fn.reset_robot(self, env_ids)
         event_fn.reset_box(self, env_ids)
         event_fn.reset_target(self, env_ids)
