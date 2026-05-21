@@ -20,27 +20,26 @@ Architecture (see env.py and events.update_autocmd):
       magnitude is zero, so the tracking reward pays the policy for being
       STILL — exactly when it needs to grasp / release.
 
-    * Manipulation milestones layer on top:
+    * Dense staged manipulation reward layers on top:
 
-          + bimanual_contact  (one-shot, both palms within GRIP_DISTANCE)
-          + lift              (one-shot, box.z first crosses BOX_LIFT_Z)
-          + place_bonus       (continuous, box xy within tol of target AND
-                               on table)
-          − drop              (one-shot, box hits the floor; from terminations)
-          − termination       (-pen_termination, only when robot fell;
-                               read from env._fell_buf, NOT generic
-                               mdp.is_terminated, so box-drop / success
-                               don't double-fire)
+          + reach        (per-arm, each palm → its own box face)
+          + squeeze      (peaks when BOTH palms are precisely on the faces)
+          + lift_shaping (continuous box-height shaping)
+          + lift         (one-shot, box.z first crosses BOX_LIFT_Z)
+          + carry        (continuous, gated on lifted; box → target xy)
+          + place_bonus  (continuous, box xy within tol of target AND on table)
+          + success      (one-shot terminal, success criterion met)
+          − drop         (one-shot, box hits the floor; from terminations)
+          − termination  (-pen_termination, only when robot fell; read from
+                          env._fell_buf, NOT generic mdp.is_terminated, so
+                          box-drop / success don't double-fire)
 
-    * Locomotion regularizers kept at ~0.5× weight (see env_cfg pen_* fields).
+    * Locomotion regularizers (see env_cfg pen_* fields).
 
-One-shot milestone bonuses are gated by per-env latched flags
-(``env._bimanual_contact_achieved``, ``env._lift_achieved``) so each fires
-once per episode and can't be farmed. The flags are reset in
-``BoxTransportEnv._reset_idx``. The flags also use CURRENT box state to
-detect the transition — a dropped-and-re-lifted box does not double-fire
-the lift bonus, but the policy is also not penalised for needing a second
-attempt.
+The lift one-shot bonus is gated by the per-env latch ``env._lift_achieved``
+so it fires once per episode and can't be farmed by bouncing the box. It
+uses CURRENT box state to detect the rising-edge transition; the latch is
+reset in ``BoxTransportEnv._reset_idx``.
 """
 from __future__ import annotations
 
@@ -50,7 +49,7 @@ import torch
 
 import isaaclab.envs.mdp as mdp
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as locomotion_mdp
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import quat_apply, quat_apply_inverse
 
 if TYPE_CHECKING:
     from .env import BoxTransportEnv
@@ -77,29 +76,35 @@ def compute_reward(env: "BoxTransportEnv") -> torch.Tensor:
 
     # ── Geometry shortcuts ────────────────────────────────────────────
     box_pos_w    = env.box.data.root_pos_w
+    box_quat_w   = env.box.data.root_quat_w
     target_pos_w = env._target_pos_w
     l_palm_w = env.robot.data.body_pos_w[:, env._left_palm_body_id]
     r_palm_w = env.robot.data.body_pos_w[:, env._right_palm_body_id]
 
-    # ── Stage 1 — REACH (dense, per-arm exp(-d/σ) kernel) ──────────────
-    # Non-vanishing gradient (unlike a d² kernel): pulls each palm toward
-    # the box from any distance. ≈0 while walking in (palms far away),
-    # climbs to ≈1 once both palms are on the box, and stays high through
-    # the carry (rewards keeping the grip). Per-arm sum so the far arm
-    # always has its own gradient.
-    l_palm_dist = (l_palm_w - box_pos_w).norm(dim=-1)
-    r_palm_dist = (r_palm_w - box_pos_w).norm(dim=-1)
+    # ── Stage 1 — REACH (per-arm to box faces) + SQUEEZE ───────────────
+    # Per-side grasp targets: the left palm is guided to the box's +y face,
+    # the right palm to the -y face. The face points are computed in the
+    # BOX frame (quat_apply with the box orientation) so they track the
+    # box's faces even as it rotates — e.g. when the robot turns 90° while
+    # carrying it.
+    he = env._box_half_extent
+    face_off = torch.zeros(env.num_envs, 3, device=env.device)
+    face_off[:, 1] = he
+    left_face_w  = box_pos_w + quat_apply(box_quat_w,  face_off)   # +y face
+    right_face_w = box_pos_w + quat_apply(box_quat_w, -face_off)   # -y face
+    l_to_face = (l_palm_w - left_face_w).norm(dim=-1)
+    r_to_face = (r_palm_w - right_face_w).norm(dim=-1)
+
+    # reach: per-arm exp(-d/σ) sum — broad, non-vanishing guidance so each
+    # arm independently has a gradient toward its own face.
     std_r = cfg.rew_reach_std
     reach = 0.5 * (
-        torch.exp(-l_palm_dist / std_r) + torch.exp(-r_palm_dist / std_r)
+        torch.exp(-l_to_face / std_r) + torch.exp(-r_to_face / std_r)
     )
-
-    # ── Milestone marker — bimanual contact (one-shot) ─────────────────
-    grip = float(env._grip_distance)
-    both_palms_close = (l_palm_dist < grip) & (r_palm_dist < grip)
-    bimanual_event = both_palms_close & (~env._bimanual_contact_achieved)
-    env._bimanual_contact_achieved = env._bimanual_contact_achieved | both_palms_close
-    bimanual_contact = bimanual_event.float()
+    # squeeze: exp(-max(l,r)/σ) with a tight σ — peaks ONLY when BOTH palms
+    # are precisely on their faces (the bimanual squeeze pose). The max()
+    # means a single lagging arm tanks it — it can't be farmed one-handed.
+    squeeze = torch.exp(-torch.maximum(l_to_face, r_to_face) / cfg.rew_squeeze_std)
 
     # ── Stage 2 — LIFT (dense height shaping + one-shot bonus) ─────────
     box_z = box_pos_w[:, 2]
@@ -162,9 +167,9 @@ def compute_reward(env: "BoxTransportEnv") -> torch.Tensor:
         + cfg.rew_track_ang_vel_z  * track_ang_z
         + cfg.rew_feet_air_time    * feet_air_time
         + cfg.rew_reach            * reach
+        + cfg.rew_squeeze          * squeeze
         + cfg.rew_lift_shaping     * lift_shaping
         + cfg.rew_carry            * carry
-        + cfg.rew_bimanual_contact * bimanual_contact
         + cfg.rew_lift             * lift
         + cfg.rew_place_bonus      * place_bonus
         + cfg.rew_success          * success
@@ -191,9 +196,9 @@ def compute_reward(env: "BoxTransportEnv") -> torch.Tensor:
     extras["reward/track_ang_vel_z"]     = track_ang_z
     extras["reward/feet_air_time"]       = feet_air_time
     extras["reward/reach"]               = reach
+    extras["reward/squeeze"]             = squeeze
     extras["reward/lift_shaping"]        = lift_shaping
     extras["reward/carry"]               = carry
-    extras["reward/bimanual_contact"]    = bimanual_contact
     extras["reward/lift"]                = lift
     extras["reward/place_bonus"]         = place_bonus
     extras["reward/success"]             = success
@@ -224,7 +229,9 @@ def compute_reward(env: "BoxTransportEnv") -> torch.Tensor:
     extras["task/cmd_ang_z"]        = env._commands_dict["base_velocity"][:, 2]
     extras["task/lifted_now"]       = lifted_now.float()
     extras["task/lifted"]           = env._lift_achieved.float()
-    extras["task/bimanual_touched"] = env._bimanual_contact_achieved.float()
+    extras["task/gripped"]          = (
+        (l_to_face < 0.10) & (r_to_face < 0.10)
+    ).float()
     extras["task/success_steps"]    = env._success_step_count.float()
 
     return reward

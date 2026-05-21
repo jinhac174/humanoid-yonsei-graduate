@@ -43,11 +43,11 @@ TABLE_SIZE = (1.0, 1.0, 0.55)            # (sx, sy, sz). Height lowered 0.78 →
 TABLE_TOP_Z = TABLE_SIZE[2]              # 0.55 m
 
 START_TABLE_POS  = (2.5,  0.0, TABLE_SIZE[2] / 2)   # 2.5 m forward of spawn
-TARGET_TABLE_POS = (2.5, -2.0, TABLE_SIZE[2] / 2)   # 2.0 m to the RIGHT of start
-                                                    # (pulled in from 3.0 — shorter
-                                                    # carry). Off-axis so the
-                                                    # autocmd never points through
-                                                    # the start table.
+# Target table sits at the SAME x as where the robot stops to grab
+# (~1.8 m), straight along -y. So after the robot grabs the box and turns
+# 90° right, the target table is directly in front of it — not off to one
+# side. ~2.5 m carry distance down the -y corridor.
+TARGET_TABLE_POS = (1.8, -2.5, TABLE_SIZE[2] / 2)
 
 BOX_SIZE = (0.24, 0.24, 0.24)            # 24 cm cube (was 30) — easier bimanual grip
 BOX_MASS = 0.8                           # kg (was 1.5) — scaled down with the box
@@ -64,7 +64,7 @@ BOX_SPAWN_POS = (
 # table — same reasoning, the robot reaches over from in front.
 TARGET_ANCHOR_POS = (
     TARGET_TABLE_POS[0],
-    TARGET_TABLE_POS[1] + TABLE_SIZE[1] / 2 - 0.20,   # y = -1.70 (0.20 m onto table)
+    TARGET_TABLE_POS[1] + TABLE_SIZE[1] / 2 - 0.20,   # y = -2.20 (0.20 m onto table)
     TABLE_TOP_Z + BOX_SIZE[2] / 2 + 0.001,
 )
 # Uniform half-range sampled around TARGET_ANCHOR_POS each reset.
@@ -82,9 +82,9 @@ BOX_REST_Z = TABLE_TOP_Z + BOX_SIZE[2] / 2          # = 0.67 m
 # — otherwise the flag would fire at spawn before the policy acts.
 BOX_LIFT_Z = BOX_REST_Z + 0.10                      # = 0.77 m
 
-# Bimanual-contact gating: both palms within this distance from the box
-# centre to count as "gripping".
-GRIP_DISTANCE = 0.20                     # m
+# Box half-extent (m) — used to place the per-side grasp targets on the
+# box's +y / -y faces for the reach / squeeze reward.
+BOX_HALF_EXTENT = BOX_SIZE[1] / 2        # 0.12 m
 
 
 # --- Scene --------------------------------------------------------------
@@ -252,13 +252,10 @@ class BoxTransportEnvCfg(DirectRLEnvCfg):
     # Architecture:
     #   * Navigation = phase-1 velocity-tracking reward against the
     #     auto-derived command from ``events.update_autocmd``.
-    #   * Arm guidance = DENSE reach shaping (rew_reach) — palm-to-box
-    #     distance kernel, always on, so the arms have a continuous
-    #     gradient toward the box (and toward keeping it gripped during
-    #     the carry). Without this the only arm signal was the sparse
-    #     bimanual_contact bonus, which is too sparse to discover.
-    #   * Manipulation milestones = bimanual_contact (one-shot) →
-    #     lift (one-shot) → place_bonus (continuous on target) → drop pen.
+    #   * Manipulation = dense staged shaping, strong enough to dominate
+    #     locomotion once the robot is at the box:
+    #         reach → squeeze → lift → carry → place → success
+    #     Each stage has a non-vanishing dense gradient into the next.
 
     # Locomotion tracking (mirror of velocity_tracking.yaml defaults).
     rew_track_lin_vel_xy:       float = 1.0
@@ -276,13 +273,18 @@ class BoxTransportEnvCfg(DirectRLEnvCfg):
     # Fix: a strong, non-vanishing dense gradient at EVERY stage, mirroring
     # the reorient task's staged structure (reach → lift → carry → place).
 
-    # Stage 1 — REACH. Per-arm exp(-d/σ) kernel: non-vanishing gradient
-    # (unlike the d² kernel). reward = 0.5*(exp(-l/σ)+exp(-r/σ)), always
-    # on (≈0 far away, so no gate needed). Weight 10 so that AT the box it
-    # dominates the ~2/step locomotion reward — reaching the arms in is
-    # then unambiguously the highest-value action.
-    rew_reach:               float = 10.0
+    # Stage 1 — REACH (per-arm) + SQUEEZE (both palms precisely on faces).
+    #   reach: each palm is pulled toward ITS OWN box face — left palm to
+    #     the box +y face, right palm to the box -y face — via a per-arm
+    #     exp(-d/σ) sum. Broad, non-vanishing guidance to the grasp pose.
+    #   squeeze: exp(-max(l,r)/σ_sq) with a TIGHT σ — peaks only when BOTH
+    #     palms are precisely on their faces, i.e. the bimanual squeeze.
+    #     The max() means one lagging arm tanks it (can't be farmed
+    #     one-handed).
+    rew_reach:               float = 8.0
     rew_reach_std:           float = 0.35
+    rew_squeeze:             float = 6.0
+    rew_squeeze_std:         float = 0.12
 
     # Stage 2 — LIFT. Dense height shaping clip(box.z-rest, 0, H)/H, always
     # on, plus the one-shot crossing bonus.
@@ -299,9 +301,6 @@ class BoxTransportEnvCfg(DirectRLEnvCfg):
     rew_place_bonus:         float = 20.0    # per-step while box on target within tol
     rew_success:             float = 300.0   # one-shot terminal: success criterion met
     rew_place_distance_tol:  float = 0.15
-
-    # Milestone marker (small one-shot; mainly feeds the task/ diagnostic).
-    rew_bimanual_contact:    float = 5.0
 
     # Negative — discourage dropping.
     pen_drop:                float = 50.0    # one-shot when box hits the floor

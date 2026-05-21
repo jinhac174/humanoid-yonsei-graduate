@@ -51,15 +51,19 @@ rew_feet_air_time:            0.75
 rew_feet_air_time_threshold:  0.4
 
 # ── Manipulation reward — dense staged shaping ─────────────────────────
-# First 6 runs failed: arms never reached. The old reach term (weight 1,
-# d² kernel) had a vanishing gradient and lost to the ~2/step locomotion
-# reward. Now: a strong non-vanishing dense gradient at every stage
-# (reach → lift → carry → place), mirroring the reorient task structure.
+# Strong non-vanishing dense gradient at every stage:
+#   reach → squeeze → lift → carry → place → success
+# mirroring the reorient task structure. Each stage flows into the next.
 
-# Stage 1 — REACH: per-arm exp(-d/σ), weight 10 so it dominates locomotion
-# at the box. Reaching the arms in becomes the highest-value action.
-rew_reach:               10.0
+# Stage 1 — REACH (per-arm to box faces) + SQUEEZE (both palms on faces).
+#   reach: each palm guided to its OWN box face (left palm → +y face,
+#     right palm → -y face) via a per-arm exp(-d/σ) sum. Broad guidance.
+#   squeeze: exp(-max(l,r)/σ), tight σ — peaks only when BOTH palms are
+#     precisely on their faces (the bimanual squeeze pose).
+rew_reach:               8.0
 rew_reach_std:           0.35
+rew_squeeze:             6.0
+rew_squeeze_std:         0.12
 
 # Stage 2 — LIFT: dense height shaping (0..1 over rew_lift_shaping_height
 # metres of rise) + one-shot crossing bonus.
@@ -76,9 +80,6 @@ rew_carry_std:           1.0
 rew_place_bonus:         20.0     # per-step while box on target within tol
 rew_success:             300.0    # one-shot terminal — success criterion met
 rew_place_distance_tol:  0.15     # m — counts as "placed"
-
-# Milestone marker (small one-shot; mainly feeds the task/ diagnostic).
-rew_bimanual_contact:    5.0
 
 # Penalties.
 pen_drop:                50.0     # one-shot when box hits the floor

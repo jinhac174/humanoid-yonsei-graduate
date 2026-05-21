@@ -2,7 +2,7 @@
 
 Adds on top of :class:`evaluators.base.BaseEvaluator`:
 
-    1. Per-episode milestone counters (bimanual_touched, lifted, placed
+    1. Per-episode milestone counters (lifted, max box rise, placed
        success-frames) printed in the one-line episode summary.
     2. Camera FOLLOW: cfg.task.cameras[*].eye/.lookat are interpreted as
        OFFSETS from the robot base each frame (Z absolute), so the video
@@ -27,8 +27,8 @@ class BoxTransportEvaluator(BaseEvaluator):
         self._reset_episode_stats()
 
     def _reset_episode_stats(self) -> None:
-        self._touched = False
-        self._lifted  = False
+        self._lifted = False
+        self._max_box_rise = 0.0
         self._max_success_steps = 0
         self._final_dist_to_target = float("nan")
 
@@ -37,13 +37,14 @@ class BoxTransportEvaluator(BaseEvaluator):
 
     def on_step(self, step: int, info: dict) -> None:
         env = self.unwrapped
-        # Read the latched milestone flags from env 0.
-        self._touched = bool(env._bimanual_contact_achieved[0].item())
-        self._lifted  = bool(env._lift_achieved[0].item())
+        self._lifted = bool(env._lift_achieved[0].item())
+        # Max box rise above its table-rest height — a continuous proxy for
+        # "did the robot get hold of the box and lift it" (0 = never moved).
+        rise = float(env.box.data.root_pos_w[0, 2].item()) - env._box_rest_z
+        self._max_box_rise = max(self._max_box_rise, rise)
         ss = int(env._success_step_count[0].item())
-        if ss > self._max_success_steps:
-            self._max_success_steps = ss
-        # Track final distance to target (xy) for the summary line.
+        self._max_success_steps = max(self._max_success_steps, ss)
+        # Final box→target xy distance for the summary line.
         box_xy = env.box.data.root_pos_w[0, :2]
         tgt_xy = env._target_pos_w[0, :2]
         self._final_dist_to_target = float((box_xy - tgt_xy).norm().item())
@@ -51,7 +52,7 @@ class BoxTransportEvaluator(BaseEvaluator):
     def episode_summary(self, ep: int, steps: int, total_reward: float) -> str:
         return (
             f"  ep{ep:03d} | steps={steps:4d} | reward={total_reward:8.2f} "
-            f"| touched={int(self._touched)} lifted={int(self._lifted)} "
+            f"| lifted={int(self._lifted)} max_rise={self._max_box_rise:.2f}m "
             f"| max_place_steps={self._max_success_steps:3d} "
             f"| final_dist_to_target={self._final_dist_to_target:.3f} m"
         )

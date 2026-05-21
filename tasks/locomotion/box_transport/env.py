@@ -25,9 +25,9 @@ The env owns:
 * ``self._target_pos_w``                    — (N, 3) target xy on target
                                               table top, sampled at
                                               reset.
-* Milestone latches (``_bimanual_contact_achieved``, ``_lift_achieved``),
-  a success counter (``_success_step_count``), and termination cause
-  buffers (``_fell_buf``, ``_box_dropped_buf``, ``_success_buf``) which
+* The ``_lift_achieved`` latch (for the one-shot lift bonus), a success
+  counter (``_success_step_count``), and termination cause buffers
+  (``_fell_buf``, ``_box_dropped_buf``, ``_success_buf``) which
   ``terminations.py`` populates and ``rewards.py`` reads.
 """
 from __future__ import annotations
@@ -46,10 +46,10 @@ from . import observations as obs_fn
 from . import rewards as rew_fn
 from . import terminations as term_fn
 from .env_cfg import (
+    BOX_HALF_EXTENT,
     BOX_LIFT_Z,
     BOX_REST_Z,
     BOX_SPAWN_POS,
-    GRIP_DISTANCE,
     LEFT_FOOT_BODY,
     LEFT_PALM_BODY,
     RIGHT_FOOT_BODY,
@@ -155,16 +155,15 @@ class BoxTransportEnv(DirectRLEnv):
         self._target_z = float(TARGET_Z)
         self._box_lift_z = float(BOX_LIFT_Z)
         self._box_rest_z = float(BOX_REST_Z)
-        self._grip_distance = float(GRIP_DISTANCE)
+        self._box_half_extent = float(BOX_HALF_EXTENT)
         # Used by events.reset_box (env-local box spawn position).
         self._box_spawn_pos_local = torch.tensor(
             BOX_SPAWN_POS, dtype=torch.float32, device=self.device,
         )
 
-        # -- Milestone latches (reset in _reset_idx) --
-        self._bimanual_contact_achieved = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device,
-        )
+        # -- Milestone latch (reset in _reset_idx): the lift one-shot bonus
+        #    fires once per episode on the first frame the box crosses
+        #    BOX_LIFT_Z; this latch records that it has fired.
         self._lift_achieved = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device,
         )
@@ -273,6 +272,5 @@ class BoxTransportEnv(DirectRLEnv):
         # Clear control + task buffers for these envs.
         self._actions[env_ids] = 0.0
         self._prev_actions[env_ids] = 0.0
-        self._bimanual_contact_achieved[env_ids] = False
         self._lift_achieved[env_ids] = False
         self._success_step_count[env_ids] = 0
