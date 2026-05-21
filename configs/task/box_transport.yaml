@@ -60,21 +60,21 @@ rew_feet_air_time_threshold:  0.4
 #     right palm → -y face) via a per-arm exp(-d/σ) sum. Broad guidance.
 #   squeeze: exp(-max(l,r)/σ), tight σ — peaks only when BOTH palms are
 #     precisely on their faces (the bimanual squeeze pose).
-rew_reach:               8.0
+rew_reach:               16.0
 rew_reach_std:           0.35
-rew_squeeze:             6.0
+rew_squeeze:             10.0
 rew_squeeze_std:         0.12
 
 # Stage 2 — LIFT: dense height shaping (0..1 over rew_lift_shaping_height
 # metres of rise) + one-shot crossing bonus.
-rew_lift_shaping:        5.0
+rew_lift_shaping:        12.0
 rew_lift_shaping_height: 0.30
-rew_lift:                100.0    # one-shot — box.z first crosses BOX_LIFT_Z
+rew_lift:                150.0    # one-shot — box.z first crosses BOX_LIFT_Z
 
 # Stage 3 — CARRY: dense exp(-box_to_target_xy / σ), gated on lifted —
 # pulls the held box toward the target table.
-rew_carry:               8.0
-rew_carry_std:           1.0
+rew_carry:               10.0
+rew_carry_std:           0.8
 
 # Stage 4 — PLACE: per-step bonus on target + one-shot terminal success.
 rew_place_bonus:         20.0     # per-step while box on target within tol

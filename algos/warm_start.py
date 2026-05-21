@@ -97,6 +97,29 @@ def warm_start_load(trainer, ckpt_path: str, phase1_obs_dim: int = PHASE1_OBS_DI
     # Apply the merged state_dict (strict=False is paranoid; new_sd has all keys).
     trainer.agent.network.load_state_dict(new_sd, strict=False)
 
+    # ── Re-inflate arm + hand exploration noise ──────────────────────────
+    # The phase-1 (velocity-tracking) policy barely moved its arms, so it
+    # shrank the action-noise (log_std / sigma) for the arm + hand DoF —
+    # leaving the warm-started policy in a low-exploration local optimum
+    # that no amount of dense reach reward can escape (it simply never
+    # samples a big enough arm motion to discover the gradient). We reset
+    # the noise for the 28 arm+hand action dims (indices 15:43 — the order
+    # is legs[0:12] | waist[12:15] | arms[15:29] | hands[29:43]) back to a
+    # healthy exploration level. Legs + waist keep the well-tuned
+    # locomotion noise so the warm-started gait is not disturbed.
+    net = trainer.agent.network
+    arm_hand = slice(15, 43)
+    explore_log_std = float(torch.log(torch.tensor(0.8)))   # std 0.8
+    with torch.no_grad():
+        if hasattr(net, "log_std"):           # PPO ActorCritic
+            net.log_std.data[arm_hand] = explore_log_std
+            noise_note = "log_std[15:43] reset to std 0.8 (PPO)"
+        elif hasattr(net, "sigma"):           # SAPG / EPO (per-block)
+            net.sigma.data[:, arm_hand] = explore_log_std
+            noise_note = "sigma[:, 15:43] reset to std 0.8 (SAPG/EPO, all blocks)"
+        else:
+            noise_note = "no log_std/sigma found — exploration noise NOT reset"
+
     # Running obs stats: extend with default values for new dims.
     old_mean = ckpt["obs_mean"]
     old_var = ckpt["obs_var"]
@@ -138,5 +161,6 @@ def warm_start_load(trainer, ckpt_path: str, phase1_obs_dim: int = PHASE1_OBS_DI
             print(f"    ✗ {s}")
     print(f"[warm_start] {stat_note}")
     print(f"[warm_start] {val_note}")
+    print(f"[warm_start] exploration: {noise_note}")
     print(f"[warm_start] optimizer: NOT copied (fresh state)")
     return int(ckpt.get("iteration", 0))

@@ -44,10 +44,11 @@ TABLE_TOP_Z = TABLE_SIZE[2]              # 0.55 m
 
 START_TABLE_POS  = (2.5,  0.0, TABLE_SIZE[2] / 2)   # 2.5 m forward of spawn
 # Target table sits at the SAME x as where the robot stops to grab
-# (~1.8 m), straight along -y. So after the robot grabs the box and turns
-# 90° right, the target table is directly in front of it — not off to one
-# side. ~2.5 m carry distance down the -y corridor.
-TARGET_TABLE_POS = (1.8, -2.5, TABLE_SIZE[2] / 2)
+# (~1.8 m), straight along -y — so after the robot grabs the box and
+# turns 90° right, the target table is directly in front of it. Pulled
+# in close (~0.9 m carry) so the focus this round is the grasp+lift, not
+# a long carry.
+TARGET_TABLE_POS = (1.8, -1.6, TABLE_SIZE[2] / 2)
 
 BOX_SIZE = (0.24, 0.24, 0.24)            # 24 cm cube (was 30) — easier bimanual grip
 BOX_MASS = 0.8                           # kg (was 1.5) — scaled down with the box
@@ -281,21 +282,21 @@ class BoxTransportEnvCfg(DirectRLEnvCfg):
     #     palms are precisely on their faces, i.e. the bimanual squeeze.
     #     The max() means one lagging arm tanks it (can't be farmed
     #     one-handed).
-    rew_reach:               float = 8.0
+    rew_reach:               float = 16.0
     rew_reach_std:           float = 0.35
-    rew_squeeze:             float = 6.0
+    rew_squeeze:             float = 10.0
     rew_squeeze_std:         float = 0.12
 
     # Stage 2 — LIFT. Dense height shaping clip(box.z-rest, 0, H)/H, always
     # on, plus the one-shot crossing bonus.
-    rew_lift_shaping:        float = 5.0
+    rew_lift_shaping:        float = 12.0
     rew_lift_shaping_height: float = 0.30    # m of rise that saturates the term
-    rew_lift:                float = 100.0   # one-shot: box.z first crosses BOX_LIFT_Z
+    rew_lift:                float = 150.0   # one-shot: box.z first crosses BOX_LIFT_Z
 
     # Stage 3 — CARRY. Dense exp(-box_to_target_xy / σ) kernel, gated on the
     # box being currently lifted — pulls the held box toward the target.
-    rew_carry:               float = 8.0
-    rew_carry_std:           float = 1.0
+    rew_carry:               float = 10.0
+    rew_carry_std:           float = 0.8
 
     # Stage 4 — PLACE. Per-step bonus on target + one-shot terminal success.
     rew_place_bonus:         float = 20.0    # per-step while box on target within tol

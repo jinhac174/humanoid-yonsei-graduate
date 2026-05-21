@@ -16,17 +16,21 @@ so a locomotion checkpoint can be warm-started):
     [144:148]  box_quat           (world quaternion, wxyz)
     [148:151]  box_lin_vel_b      (box lin vel, robot base frame)
     [151:154]  target_pos_rel     (target - robot root, in robot base frame)
-    [154:157]  l_palm_to_box      (box - left_palm,  robot base frame)
-    [157:160]  r_palm_to_box      (box - right_palm, robot base frame)
+    [154:157]  l_palm_to_face     (left grasp face - left_palm,  robot base frame)
+    [157:160]  r_palm_to_face     (right grasp face - right_palm, robot base frame)
     [160:163]  box_to_target      (target - box, world frame)
     [163]      lifted_flag        (1.0 if box.z > BOX_LIFT_Z this step)
+
+The l_palm_to_face / r_palm_to_face slots give the policy exactly the
+vector the reach reward asks it to minimise (palm → its own box face),
+so observation and reward are aligned.
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 import torch
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import quat_apply, quat_apply_inverse
 
 if TYPE_CHECKING:
     from .env import BoxTransportEnv
@@ -71,8 +75,15 @@ def get_observations(env: "BoxTransportEnv") -> torch.Tensor:
     box_pos_rel    = quat_apply_inverse(robot_quat_w, box_pos_w - robot_pos_w)
     box_lin_vel_b  = quat_apply_inverse(robot_quat_w, box_lin_w)
     target_pos_rel = quat_apply_inverse(robot_quat_w, target_pos_w - robot_pos_w)
-    l_palm_to_box  = quat_apply_inverse(robot_quat_w, box_pos_w - l_palm_w)
-    r_palm_to_box  = quat_apply_inverse(robot_quat_w, box_pos_w - r_palm_w)
+    # Per-side grasp targets — the box's +y / -y faces, computed in the box
+    # frame so they track the faces as the box rotates. These are the exact
+    # points the reach reward pulls the palms toward.
+    face_off = torch.zeros(env.num_envs, 3, device=box_pos_w.device)
+    face_off[:, 1] = env._box_half_extent
+    left_face_w  = box_pos_w + quat_apply(box_quat_w,  face_off)
+    right_face_w = box_pos_w + quat_apply(box_quat_w, -face_off)
+    l_palm_to_face = quat_apply_inverse(robot_quat_w, left_face_w  - l_palm_w)
+    r_palm_to_face = quat_apply_inverse(robot_quat_w, right_face_w - r_palm_w)
     # box_to_target left in world frame: it's a goal direction independent of
     # the robot's current heading.
     box_to_target  = target_pos_w - box_pos_w
@@ -93,7 +104,7 @@ def get_observations(env: "BoxTransportEnv") -> torch.Tensor:
             base_lin_vel, base_ang_vel, projected_gravity, velocity_commands,
             joint_pos_rel, joint_vel_rel, last_action,
             box_pos_rel, box_quat_w, box_lin_vel_b,
-            target_pos_rel, l_palm_to_box, r_palm_to_box, box_to_target,
+            target_pos_rel, l_palm_to_face, r_palm_to_face, box_to_target,
             lifted_flag,
         ],
         dim=-1,
