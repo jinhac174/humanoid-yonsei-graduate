@@ -37,10 +37,15 @@ RIGHT_PALM_BODY = "right_hand_palm_link"
 # --- Scene layout constants (meters, world frame) ------------------------
 # Robot spawns at the world origin (0,0,*) facing +x. L-shaped task: walk
 # +x to the start table, grab the box, turn 90° and walk -y to the target.
-TABLE_SIZE = (1.0, 1.0, 0.55)            # (sx, sy, sz). Height lowered 0.78 → 0.55
-                                         # so the box sits at a comfortable
-                                         # grab height for the G1 (pelvis 0.74).
-TABLE_TOP_Z = TABLE_SIZE[2]              # 0.55 m
+TABLE_SIZE = (1.0, 1.0, 0.70)            # (sx, sy, sz). Top at 0.70 m → box
+                                         # centre at 0.82 m, which is the G1's
+                                         # natural hand height (pelvis 0.74 m,
+                                         # shoulders ~1.1 m). A box at hand
+                                         # height makes the bimanual grasp a
+                                         # forward reach, NOT a deep squat —
+                                         # the single biggest lever for making
+                                         # the lift learnable.
+TABLE_TOP_Z = TABLE_SIZE[2]              # 0.70 m
 
 START_TABLE_POS  = (2.5,  0.0, TABLE_SIZE[2] / 2)   # 2.5 m forward of spawn
 # Target table sits at the SAME x as where the robot stops to grab
@@ -78,14 +83,41 @@ TARGET_Z = TABLE_TOP_Z + BOX_SIZE[2] / 2 + 0.001  # tiny epsilon over the surfac
 BOX_DROP_Z = 0.20
 
 # Box rest height (center) when sitting on a table top.
-BOX_REST_Z = TABLE_TOP_Z + BOX_SIZE[2] / 2          # = 0.67 m
+BOX_REST_Z = TABLE_TOP_Z + BOX_SIZE[2] / 2          # = 0.82 m
 # Lift threshold: box center must rise 10 cm above rest to count as lifted
 # — otherwise the flag would fire at spawn before the policy acts.
-BOX_LIFT_Z = BOX_REST_Z + 0.10                      # = 0.77 m
+BOX_LIFT_Z = BOX_REST_Z + 0.10                      # = 0.92 m
 
 # Box half-extent (m) — used to place the per-side grasp targets on the
 # box's +y / -y faces for the reach / squeeze reward.
 BOX_HALF_EXTENT = BOX_SIZE[1] / 2        # 0.12 m
+
+
+# --- Phase-A "assisted grasp" constants ----------------------------------
+# Two-phase warm-start chain (see scripts/sbatch + warm_start.py):
+#   Phase A — assisted_grasp_start=True: the robot spawns standing AT the
+#     start table with its arms pre-posed around the box, so the policy
+#     learns squeeze → lift → carry → place without the hard walk-in +
+#     reach-discovery. Warm-started from the velocity-tracking checkpoint.
+#   Phase B — assisted_grasp_start=False (default, the full task): warm-
+#     started from the Phase-A checkpoint, which already knows the grasp
+#     and carry; Phase B only adds the walk-in and the reach-from-default.
+#
+# Robot standing pose for Phase A — at the start table, the spot the
+# autocmd stops it at. env-local; faces +x toward the box.
+ASSISTED_ROBOT_AT_TABLE = (1.80, 0.0, 0.74)
+# Pre-posed arm joints (rad) for Phase A — the vetted "ready to manipulate
+# a table object" pose from the working reorient task (g1_cfg
+# _INIT_JOINT_POS_MANIPULATION): shoulder_pitch -0.9, shoulder_roll 0.4,
+# elbow 0.6. 28 values in actuated order: left arm(7), right arm(7), left
+# hand(7), right hand(7). Per arm: shoulder_pitch, _roll, _yaw, elbow,
+# wrist_roll, _pitch, _yaw. Hands open (0).
+ASSISTED_GRASP_ARM_POSE = (
+    -0.9, 0.4, 0.0, 0.6, 0.0, 0.0, 0.0,       # left arm
+    -0.9, 0.4, 0.0, 0.6, 0.0, 0.0, 0.0,       # right arm
+     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,       # left hand (open)
+     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,       # right hand (open)
+)
 
 
 # --- Scene --------------------------------------------------------------
@@ -154,8 +186,10 @@ class BoxTransportSceneCfg(InteractiveSceneCfg):
                 max_angular_velocity=10.0,
                 max_depenetration_velocity=1.0,
             ),
+            # High friction (1.5) so a moderate bimanual squeeze holds the
+            # box — makes the lift physically easier to discover.
             physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.0, dynamic_friction=1.0,
+                static_friction=1.5, dynamic_friction=1.5,
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=BOX_SPAWN_POS),
@@ -209,8 +243,8 @@ class BoxTransportEnvCfg(DirectRLEnvCfg):
     #   [144:148]  box_quat       (world; orientation isn't base-frame critical)
     #   [148:151]  box_lin_vel_b  (box linear vel, robot base frame)
     #   [151:154]  target_pos_rel (target - robot root, in robot base frame)
-    #   [154:157]  l_palm_to_box  (box - left_palm, robot base frame)
-    #   [157:160]  r_palm_to_box  (box - right_palm, robot base frame)
+    #   [154:157]  l_palm_to_face (left grasp face - left_palm, base frame)
+    #   [157:160]  r_palm_to_face (right grasp face - right_palm, base frame)
     #   [160:163]  box_to_target  (target - box, world frame)
     #   [163]      lifted_flag    (1 if box.z > BOX_LIFT_Z this step)
     observation_space = Box(low=-np.inf, high=np.inf, shape=(164,))
@@ -267,44 +301,55 @@ class BoxTransportEnvCfg(DirectRLEnvCfg):
     rew_feet_air_time_threshold:float = 0.4
 
     # ── Manipulation reward — dense staged shaping ───────────────────────
-    # Diagnosis from the first 6 runs: arms never reached. The old reach
-    # term (weight 1, exp(-d²/σ²)) had a VANISHING gradient far from the
-    # box and was a minority signal vs the ~2/step locomotion reward — the
-    # policy maximised reward by walking to the box and standing still.
-    # Fix: a strong, non-vanishing dense gradient at EVERY stage, mirroring
-    # the reorient task's staged structure (reach → lift → carry → place).
+    # Staged dense gradient: reach → squeeze → grip-force → lift → carry →
+    # place → success. Weights are MODERATED from the earlier desperate
+    # values (reach was 16, lift_shaping 12) so the manipulation reward no
+    # longer ~10x-swamps the locomotion reward — the warm-started gait was
+    # collapsing under that pressure (PPO fell). Manipulation still leads
+    # at the box (~25/step vs ~2-3/step locomotion) but no longer crushes
+    # the gait.
 
-    # Stage 1 — REACH (per-arm) + SQUEEZE (both palms precisely on faces).
-    #   reach: each palm is pulled toward ITS OWN box face — left palm to
-    #     the box +y face, right palm to the box -y face — via a per-arm
-    #     exp(-d/σ) sum. Broad, non-vanishing guidance to the grasp pose.
-    #   squeeze: exp(-max(l,r)/σ_sq) with a TIGHT σ — peaks only when BOTH
-    #     palms are precisely on their faces, i.e. the bimanual squeeze.
-    #     The max() means one lagging arm tanks it (can't be farmed
-    #     one-handed).
-    rew_reach:               float = 16.0
+    # Stage 1 — REACH (per-arm to box faces) + SQUEEZE (both palms on
+    # faces) + GRIP-FORCE (the actual press).
+    #   reach: each palm pulled toward ITS box face via a per-arm
+    #     exp(-d/σ) sum — broad, non-vanishing guidance.
+    #   squeeze: exp(-max(l,r)/σ_sq), tight σ — peaks only when BOTH palms
+    #     are precisely on their faces (the geometric squeeze pose).
+    #   grip_force: the palm↔box contact-force magnitude (capped). This is
+    #     the DIRECT reward for pressing the box — without it the only
+    #     signal for "press hard" was the indirect lift term, and the
+    #     squeeze→lift gap was never crossed. This is the key new term.
+    rew_reach:               float = 8.0
     rew_reach_std:           float = 0.35
-    rew_squeeze:             float = 10.0
+    rew_squeeze:             float = 6.0
     rew_squeeze_std:         float = 0.12
+    rew_grip_force:          float = 5.0
+    grip_force_cap:          float = 10.0    # N — reward saturates at a firm grip
 
     # Stage 2 — LIFT. Dense height shaping clip(box.z-rest, 0, H)/H, always
     # on, plus the one-shot crossing bonus.
-    rew_lift_shaping:        float = 12.0
+    rew_lift_shaping:        float = 8.0
     rew_lift_shaping_height: float = 0.30    # m of rise that saturates the term
-    rew_lift:                float = 150.0   # one-shot: box.z first crosses BOX_LIFT_Z
+    rew_lift:                float = 120.0   # one-shot: box.z first crosses BOX_LIFT_Z
 
     # Stage 3 — CARRY. Dense exp(-box_to_target_xy / σ) kernel, gated on the
     # box being currently lifted — pulls the held box toward the target.
-    rew_carry:               float = 10.0
+    rew_carry:               float = 6.0
     rew_carry_std:           float = 0.8
 
     # Stage 4 — PLACE. Per-step bonus on target + one-shot terminal success.
-    rew_place_bonus:         float = 20.0    # per-step while box on target within tol
+    rew_place_bonus:         float = 12.0    # per-step while box on target within tol
     rew_success:             float = 300.0   # one-shot terminal: success criterion met
     rew_place_distance_tol:  float = 0.15
 
     # Negative — discourage dropping.
     pen_drop:                float = 50.0    # one-shot when box hits the floor
+
+    # ── Phase-A assisted-grasp start (opt-in; default off = full task) ──
+    # When True, training resets spawn the robot AT the start table with
+    # its arms pre-posed around the box (ASSISTED_GRASP_ARM_POSE). Used for
+    # the Phase-A warm-start run; Phase B (the full task) leaves it False.
+    assisted_grasp_start:    bool  = False
 
     # Locomotion regularizers — RESTORED to phase-1 (velocity_tracking)
     # values. The earlier 0.5× reduction degraded gait quality (weird /

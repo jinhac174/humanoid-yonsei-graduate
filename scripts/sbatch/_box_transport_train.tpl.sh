@@ -4,18 +4,22 @@
 #
 # Required env vars:
 #   ALGO  ∈ {ppo, sapg, epo}
-#   MODE  ∈ {scratch, warmstart}
+#   MODE  ∈ {scratch, warmstart, phaseA, phaseB}
 #
-# MODE drives the only difference between the two run families:
-#   scratch    — random init, no checkpoint.        run dir: <algo>_NN_scratch
-#   warmstart  — load velocity_tracking model_1500.  run dir: <algo>_NN_warmstart
-# ``+run_tag=$MODE`` is appended either way so the run dir / wandb name
-# carry the family in their name.
+# MODE drives the run family:
+#   scratch    — random init, no checkpoint.            <algo>_NN_scratch
+#   warmstart  — load velocity_tracking model_1500.      <algo>_NN_warmstart
+#   phaseA     — warmstart from velocity_tracking AND
+#                assisted_grasp_start=true (robot at the
+#                table, arms pre-posed around the box).  <algo>_NN_phaseA
+#   phaseB     — the full task, warmstart from the most
+#                recent phaseA run's final checkpoint.   <algo>_NN_phaseB
+# ``+run_tag=$MODE`` is appended so the run dir / wandb name carry it.
 
 set -euo pipefail
 
 : "${ALGO:?must be set: ppo|sapg|epo}"
-: "${MODE:?must be set: scratch|warmstart}"
+: "${MODE:?must be set: scratch|warmstart|phaseA|phaseB}"
 
 IMAGE=/home/danielc174/IsaacSim/isaacsim.sif
 ISAACLAB=/home/danielc174/IsaacLab
@@ -26,13 +30,25 @@ SCRATCH=/scratch2/danielc174
 mkdir -p "$CACHE"/{kit,ov,pip,glcache,computecache,logs,data,documents}
 
 # Mode-specific Hydra args.
+OUT=/scratch2/danielc174/humanoid-rl/outputs
 EXTRA_ARGS=( "+run_tag=$MODE" )
-if [ "$MODE" = "warmstart" ]; then
-    CKPT="/scratch2/danielc174/humanoid-rl/outputs/velocity_tracking/${ALGO}/${ALGO}_00/checkpoints/model_1500.pt"
-    [ -f "$CKPT" ] || { echo "[sbatch] CKPT NOT FOUND: $CKPT"; exit 1; }
+case "$MODE" in
+  warmstart|phaseA)
+    CKPT="$OUT/velocity_tracking/${ALGO}/${ALGO}_00/checkpoints/model_1500.pt"
+    [ -f "$CKPT" ] || { echo "[sbatch] velocity ckpt NOT FOUND: $CKPT"; exit 1; }
     EXTRA_ARGS+=( "checkpoint=$CKPT" )
+    [ "$MODE" = "phaseA" ] && EXTRA_ARGS+=( "++task.assisted_grasp_start=true" )
     echo "[sbatch] warm-start ckpt: $CKPT"
-fi
+    ;;
+  phaseB)
+    # Newest phaseA final checkpoint for this algo (resolved at run time —
+    # the slurm dependency guarantees phaseA has finished by now).
+    CKPT="$(ls -t "$OUT"/box_transport/${ALGO}/${ALGO}_*_phaseA/checkpoints/model_*.pt 2>/dev/null | head -1)"
+    [ -n "$CKPT" ] && [ -f "$CKPT" ] || { echo "[sbatch] phaseA ckpt NOT FOUND for $ALGO"; exit 1; }
+    EXTRA_ARGS+=( "checkpoint=$CKPT" )
+    echo "[sbatch] phase-B warm-start from phase-A ckpt: $CKPT"
+    ;;
+esac
 
 echo "[sbatch] node=${SLURMD_NODENAME:-?} job=${SLURM_JOB_ID:-?} algo=$ALGO mode=$MODE"
 

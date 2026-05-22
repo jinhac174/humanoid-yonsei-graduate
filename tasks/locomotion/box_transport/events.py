@@ -55,15 +55,36 @@ def _get_yaw(env: "BoxTransportEnv", env_ids: torch.Tensor) -> torch.Tensor:
 # Resets
 # -----------------------------------------------------------------------------
 def reset_robot(env: "BoxTransportEnv", env_ids: torch.Tensor) -> None:
-    """Reset root pose + joint state with small uniform noise."""
+    """Reset root pose + joint state.
+
+    Phase A (``cfg.assisted_grasp_start`` True): the robot spawns standing
+    AT the start table — the spot the autocmd stops it at — facing +x with
+    only tiny pose noise, and its 28 arm+hand joints are overridden with a
+    grasp-ready pose so the policy starts with its arms already around the
+    box. The walk-in and the reach-from-default are skipped; the policy
+    learns squeeze → lift → carry → place.
+
+    Phase B / the full task (``assisted_grasp_start`` False, the default):
+    the plain world-origin spawn, arms at the default pose.
+    """
     cfg = env.cfg
     n = env_ids.numel()
     device = env.device
+    assisted = bool(cfg.assisted_grasp_start)
 
     default_root_state = env.robot.data.default_root_state[env_ids].clone()
-    dx = _uniform(n, *cfg.reset_pose_x_range, device=device)
-    dy = _uniform(n, *cfg.reset_pose_y_range, device=device)
-    yaw = _uniform(n, *cfg.reset_pose_yaw_range, device=device)
+    if assisted:
+        # Spawn standing at the start table (env-local), facing +x.
+        default_root_state[:, 0] = env._assisted_at_table_pos[0]
+        default_root_state[:, 1] = env._assisted_at_table_pos[1]
+        default_root_state[:, 2] = env._assisted_at_table_pos[2]
+        dx  = _uniform(n, -0.05, 0.05, device=device)
+        dy  = _uniform(n, -0.05, 0.05, device=device)
+        yaw = _uniform(n, -0.15, 0.15, device=device)
+    else:
+        dx  = _uniform(n, *cfg.reset_pose_x_range, device=device)
+        dy  = _uniform(n, *cfg.reset_pose_y_range, device=device)
+        yaw = _uniform(n, *cfg.reset_pose_yaw_range, device=device)
 
     default_root_state[:, 0] += dx
     default_root_state[:, 1] += dy
@@ -90,10 +111,14 @@ def reset_robot(env: "BoxTransportEnv", env_ids: torch.Tensor) -> None:
     env.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids=env_ids)
     env.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids=env_ids)
 
-    # Joint state at default (no scaling/noise for now — keep the warm-started
-    # policy's expected initial state).
+    # Joint state — default pose, except Phase A overrides the 28 arm+hand
+    # joints with the grasp-ready pose so the policy starts with its arms
+    # already around the box.
     default_jpos = env.robot.data.default_joint_pos[env_ids].clone()
     default_jvel = env.robot.data.default_joint_vel[env_ids].clone()
+    if assisted:
+        arm_hand_ids = env._actuated_joint_ids[15:43]      # arms[15:29]|hands[29:43]
+        default_jpos[:, arm_hand_ids] = env._assisted_grasp_pose
     env.robot.write_joint_state_to_sim(default_jpos, default_jvel, env_ids=env_ids)
 
 

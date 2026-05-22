@@ -109,14 +109,14 @@ def warm_start_load(trainer, ckpt_path: str, phase1_obs_dim: int = PHASE1_OBS_DI
     # locomotion noise so the warm-started gait is not disturbed.
     net = trainer.agent.network
     arm_hand = slice(15, 43)
-    explore_log_std = float(torch.log(torch.tensor(0.8)))   # std 0.8
+    explore_log_std = float(torch.log(torch.tensor(0.6)))   # std 0.6
     with torch.no_grad():
         if hasattr(net, "log_std"):           # PPO ActorCritic
             net.log_std.data[arm_hand] = explore_log_std
-            noise_note = "log_std[15:43] reset to std 0.8 (PPO)"
+            noise_note = "log_std[15:43] reset to std 0.6 (PPO)"
         elif hasattr(net, "sigma"):           # SAPG / EPO (per-block)
             net.sigma.data[:, arm_hand] = explore_log_std
-            noise_note = "sigma[:, 15:43] reset to std 0.8 (SAPG/EPO, all blocks)"
+            noise_note = "sigma[:, 15:43] reset to std 0.6 (SAPG/EPO, all blocks)"
         else:
             noise_note = "no log_std/sigma found — exploration noise NOT reset"
 

@@ -46,6 +46,8 @@ from . import observations as obs_fn
 from . import rewards as rew_fn
 from . import terminations as term_fn
 from .env_cfg import (
+    ASSISTED_GRASP_ARM_POSE,
+    ASSISTED_ROBOT_AT_TABLE,
     BOX_HALF_EXTENT,
     BOX_LIFT_Z,
     BOX_REST_Z,
@@ -130,6 +132,15 @@ class BoxTransportEnv(DirectRLEnv):
         self._torso_sensor_ids = torch.tensor(
             torso_sensor_ids, dtype=torch.long, device=self.device,
         )
+        # Palm contact-sensor ids (sensor body-index space) — the grip-force
+        # reward reads the palm↔box contact force from these. Order: left,
+        # right (find_bodies returns them in the order requested... not
+        # guaranteed — so we resolve each separately to be sure).
+        l_palm_sid, _ = self.contact_sensor.find_bodies(LEFT_PALM_BODY)
+        r_palm_sid, _ = self.contact_sensor.find_bodies(RIGHT_PALM_BODY)
+        self._palm_sensor_ids = torch.tensor(
+            [l_palm_sid[0], r_palm_sid[0]], dtype=torch.long, device=self.device,
+        )
 
         # -- Control buffers --
         self._actions      = torch.zeros(self.num_envs, 43, device=self.device)
@@ -159,6 +170,15 @@ class BoxTransportEnv(DirectRLEnv):
         # Used by events.reset_box (env-local box spawn position).
         self._box_spawn_pos_local = torch.tensor(
             BOX_SPAWN_POS, dtype=torch.float32, device=self.device,
+        )
+
+        # -- Phase-A assisted-grasp tensors (used by events.reset_robot when
+        #    cfg.assisted_grasp_start is True) --
+        self._assisted_grasp_pose = torch.tensor(
+            ASSISTED_GRASP_ARM_POSE, dtype=torch.float32, device=self.device,
+        )
+        self._assisted_at_table_pos = torch.tensor(
+            ASSISTED_ROBOT_AT_TABLE, dtype=torch.float32, device=self.device,
         )
 
         # -- Milestone latch (reset in _reset_idx): the lift one-shot bonus

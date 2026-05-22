@@ -55,29 +55,34 @@ rew_feet_air_time_threshold:  0.4
 #   reach → squeeze → lift → carry → place → success
 # mirroring the reorient task structure. Each stage flows into the next.
 
-# Stage 1 — REACH (per-arm to box faces) + SQUEEZE (both palms on faces).
-#   reach: each palm guided to its OWN box face (left palm → +y face,
-#     right palm → -y face) via a per-arm exp(-d/σ) sum. Broad guidance.
-#   squeeze: exp(-max(l,r)/σ), tight σ — peaks only when BOTH palms are
-#     precisely on their faces (the bimanual squeeze pose).
-rew_reach:               16.0
+# Stage 1 — REACH + SQUEEZE + GRIP-FORCE. Weights MODERATED from the
+# earlier desperate values so manipulation no longer ~10x-swamps the
+# locomotion reward (that was collapsing the warm-started gait).
+#   reach: per-arm exp(-d/σ) to each palm's box face.
+#   squeeze: exp(-max(l,r)/σ), tight σ — both palms precisely on faces.
+#   grip_force: palm↔box contact-force magnitude (capped) — the DIRECT
+#     reward for pressing the box, the key new term for crossing the
+#     squeeze→lift gap.
+rew_reach:               8.0
 rew_reach_std:           0.35
-rew_squeeze:             10.0
+rew_squeeze:             6.0
 rew_squeeze_std:         0.12
+rew_grip_force:          5.0
+grip_force_cap:          10.0     # N — reward saturates at a firm grip
 
 # Stage 2 — LIFT: dense height shaping (0..1 over rew_lift_shaping_height
 # metres of rise) + one-shot crossing bonus.
-rew_lift_shaping:        12.0
+rew_lift_shaping:        8.0
 rew_lift_shaping_height: 0.30
-rew_lift:                150.0    # one-shot — box.z first crosses BOX_LIFT_Z
+rew_lift:                120.0    # one-shot — box.z first crosses BOX_LIFT_Z
 
 # Stage 3 — CARRY: dense exp(-box_to_target_xy / σ), gated on lifted —
 # pulls the held box toward the target table.
-rew_carry:               10.0
+rew_carry:               6.0
 rew_carry_std:           0.8
 
 # Stage 4 — PLACE: per-step bonus on target + one-shot terminal success.
-rew_place_bonus:         20.0     # per-step while box on target within tol
+rew_place_bonus:         12.0     # per-step while box on target within tol
 rew_success:             300.0    # one-shot terminal — success criterion met
 rew_place_distance_tol:  0.15     # m — counts as "placed"
 

@@ -106,6 +106,21 @@ def compute_reward(env: "BoxTransportEnv") -> torch.Tensor:
     # means a single lagging arm tanks it — it can't be farmed one-handed.
     squeeze = torch.exp(-torch.maximum(l_to_face, r_to_face) / cfg.rew_squeeze_std)
 
+    # grip_force: the DIRECT reward for pressing the box. Reads the contact
+    # force magnitude on each palm body, caps it (no reward for crushing),
+    # averages the two, and GATES on both palms being on their faces (so it
+    # is the box-grip force, not stray contact). Without this term the only
+    # signal to "press hard" was the indirect lift term — and that gap was
+    # never crossed. ‖force‖ ≥ ~4 N per palm holds the 0.8 kg box (μ=1.5).
+    forces_w = env.contact_sensor.data.net_forces_w           # (N, B, 3)
+    if forces_w is None or forces_w.numel() == 0:
+        grip_force = torch.zeros(env.num_envs, device=env.device)
+    else:
+        palm_f = forces_w[:, env._palm_sensor_ids, :].norm(dim=-1)  # (N, 2)
+        palm_f = torch.clip(palm_f, 0.0, cfg.grip_force_cap) / cfg.grip_force_cap
+        on_faces = (l_to_face < 0.12) & (r_to_face < 0.12)
+        grip_force = 0.5 * (palm_f[:, 0] + palm_f[:, 1]) * on_faces.float()
+
     # ── Stage 2 — LIFT (dense height shaping + one-shot bonus) ─────────
     box_z = box_pos_w[:, 2]
     lift_shaping = torch.clip(
@@ -168,6 +183,7 @@ def compute_reward(env: "BoxTransportEnv") -> torch.Tensor:
         + cfg.rew_feet_air_time    * feet_air_time
         + cfg.rew_reach            * reach
         + cfg.rew_squeeze          * squeeze
+        + cfg.rew_grip_force       * grip_force
         + cfg.rew_lift_shaping     * lift_shaping
         + cfg.rew_carry            * carry
         + cfg.rew_lift             * lift
@@ -197,6 +213,7 @@ def compute_reward(env: "BoxTransportEnv") -> torch.Tensor:
     extras["reward/feet_air_time"]       = feet_air_time
     extras["reward/reach"]               = reach
     extras["reward/squeeze"]             = squeeze
+    extras["reward/grip_force"]          = grip_force
     extras["reward/lift_shaping"]        = lift_shaping
     extras["reward/carry"]               = carry
     extras["reward/lift"]                = lift
